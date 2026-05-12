@@ -5,7 +5,8 @@
   ],
   "graphs": {
     "trading_research": "./src/agents/trading_research/research_graph.py:graph",
-    "trading_execution": "./src/agents/trading_binance/execution_graph.py:graph"
+    "trading_execution": "./src/agents/trading_binance/execution_graph.py:graph",
+    "agent": "./src/agents/main_graph/main_graph.py:graph"
   },
   "env": ".env",
   "image_distro": "wolfi"

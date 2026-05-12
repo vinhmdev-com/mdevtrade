@@ -21,8 +21,48 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 
+def _action_to_trend(action: str) -> str:
+    action = (action or "NEUTRAL").upper()
+    if action == "BUY":
+        return "BULLISH"
+    if action == "SELL":
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def read_brain_signal(state: ExecutionState) -> Dict[str, Any]:
-    print("\n[NODE: Read Brain Signal] 🧠 Reading latest signal from SQLite (Bot 1)...")
+    print("\n[NODE: Read Brain Signal] 🧠 Reading latest signal...")
+
+    # Prefer the signal already in state (when run as a subgraph after Research).
+    # This avoids a race where another bot writes to the DB between Research saving
+    # and Execution reading "latest".
+    upstream_decision = state.get("final_trade_decision") or {}
+    if upstream_decision:
+        action = upstream_decision.get("Final_Action", "NEUTRAL")
+        trend = _action_to_trend(action)
+        entry_price = float(upstream_decision.get("Entry_Price", 0.0) or 0.0)
+        # signal_id is generated when Research persists to DB but isn't in state,
+        # so fall back to the DB id corresponding to the latest row.
+        signal_id = state.get("signal_id") or 0
+        if not signal_id:
+            try:
+                latest_signal = DatabaseClient().get_latest_signal() or {}
+                signal_id = latest_signal.get("id", 0)
+            except Exception as e:
+                print(f" ⚠️ Could not resolve signal_id from DB: {e}")
+
+        print(f" => 🎯 Using upstream decision: {trend} (signal_id={signal_id})")
+        if entry_price > 0:
+            print(f" => 🎯 Suggested Entry Price: {entry_price}")
+
+        return {
+            "macro_trend": trend,
+            "signal_id": signal_id,
+            "entry_price": entry_price,
+        }
+
+    # Fallback: standalone execution path reads the latest signal from SQLite.
+    print(" - No upstream decision in state, falling back to SQLite (Bot 1)...")
     try:
         db = DatabaseClient()
         latest_signal = db.get_latest_signal()
@@ -32,20 +72,13 @@ def read_brain_signal(state: ExecutionState) -> Dict[str, Any]:
             return {"macro_trend": "NEUTRAL", "action_taken": "SKIP"}
 
         signal_id = latest_signal.get("id")
-        action = latest_signal.get("final_action", "NEUTRAL").upper()
+        trend = _action_to_trend(latest_signal.get("final_action"))
 
         print(f" => 🎯 Fetched Signal ID: {signal_id}")
-
-        trend = "NEUTRAL"
-        if action == "BUY":
-            trend = "BULLISH"
-        elif action == "SELL":
-            trend = "BEARISH"
-
         print(f" => 🎯 Analyzed Signal: {trend}")
 
         full_json = latest_signal.get("full_json", {})
-        entry_price = float(full_json.get("Entry_Price", 0.0))
+        entry_price = float(full_json.get("Entry_Price", 0.0) or 0.0)
         if entry_price > 0:
             print(f" => 🎯 Suggested Entry Price: {entry_price}")
 

@@ -43,20 +43,36 @@ def format_ticker_for_social(ticker: str) -> str:
 
 
 def yf_retry(func, max_retries=3, base_delay=2.0):
-    """Execute a yfinance call with exponential backoff on rate limits."""
+    """Execute a yfinance call with exponential backoff on rate limits or empty responses.
+
+    Retries are limited to YFRateLimitError and to empty DataFrame results
+    (yfinance sometimes returns an empty frame instead of raising when throttled).
+    Other exceptions propagate immediately so real bugs are not masked.
+    """
     for attempt in range(max_retries + 1):
         try:
-            return func()
+            res = func()
         except YFRateLimitError:
-            if attempt < max_retries:
-                delay = base_delay * (2**attempt)
-                logger.warning(
-                    f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})"
-                )
-                time.sleep(delay)
-            else:
+            if attempt >= max_retries:
                 raise
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                f"Yahoo Finance rate limited, retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            time.sleep(delay)
+            continue
 
+        if isinstance(res, pd.DataFrame) and res.empty and attempt < max_retries:
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                f"Yahoo Finance returned empty data, retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            time.sleep(delay)
+            continue
+
+        return res
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
@@ -106,7 +122,10 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             )
         )
         data = data.reset_index()
-        data.to_csv(data_file, index=False, encoding="utf-8")
+        # Only persist non-empty results: caching an empty frame would
+        # short-circuit every future call for this symbol.
+        if not data.empty:
+            data.to_csv(data_file, index=False, encoding="utf-8")
 
     data = _clean_dataframe(data)
 
