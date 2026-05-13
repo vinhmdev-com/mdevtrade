@@ -218,20 +218,37 @@ export function Thread() {
     };
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
-    
-    if (!apiUrl || !assistantId || !threadId) return;
+
+    if (!apiUrl || !assistantId) return;
 
     // The SDK's runs.create doesn't expose stream_resumable, but the backend
     // does — and without it the joinStream endpoint won't replay events when
     // the user reopens the UI mid-run. So we hit the HTTP endpoint directly.
     const apiKey = getApiKey();
+    const authHeaders: Record<string, string> = apiKey ? { "X-Api-Key": apiKey } : {};
     try {
-      const res = await fetch(`${apiUrl}/threads/${threadId}/runs`, {
+      // First message in a new conversation: no threadId yet. Create one before
+      // kicking off the run, since /threads/{id}/runs requires an existing thread.
+      let activeThreadId = threadId;
+      if (!activeThreadId) {
+        const createRes = await fetch(`${apiUrl}/threads`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({}),
+        });
+        if (!createRes.ok) {
+          const text = await createRes.text();
+          throw Object.assign(new Error(text || createRes.statusText), {
+            status: createRes.status,
+          });
+        }
+        const data = await createRes.json();
+        activeThreadId = data.thread_id;
+      }
+
+      const res = await fetch(`${apiUrl}/threads/${activeThreadId}/runs`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "X-Api-Key": apiKey } : {}),
-        },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
           assistant_id: assistantId,
           input: { messages: [...toolMessages, newHumanMessage] },
@@ -249,9 +266,8 @@ export function Thread() {
 
       // Force refresh to show the human message in UI; this also re-fires the
       // resume effect in StreamProvider, which will pick up the new run.
-      const currentThread = threadId;
       setThreadId(null);
-      setTimeout(() => setThreadId(currentThread), 50);
+      setTimeout(() => setThreadId(activeThreadId), 50);
     } catch (err: any) {
       if (err?.status === 409 || (err.message && err.message.includes("409"))) {
         toast.warning("⏳ Hệ thống đang bận xử lý tác vụ trước đó. Vui lòng chờ hoàn tất!");
