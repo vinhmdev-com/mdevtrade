@@ -107,8 +107,10 @@ export function Thread() {
     "hideToolCalls",
     parseAsBoolean.withDefault(false),
   );
-  const [apiUrl] = useQueryState("apiUrl");
-  const [assistantId] = useQueryState("assistantId");
+  const [apiUrlParam] = useQueryState("apiUrl");
+  const [assistantIdParam] = useQueryState("assistantId");
+  const apiUrl = apiUrlParam || process.env.NEXT_PUBLIC_API_URL;
+  const assistantId = assistantIdParam || process.env.NEXT_PUBLIC_ASSISTANT_ID;
   const wasRunningRef = useRef(false);
   const [input, setInput] = useState("");
   const [firstTokenReceived, setFirstTokenReceived] = useState(false);
