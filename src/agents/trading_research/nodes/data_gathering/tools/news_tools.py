@@ -1,5 +1,19 @@
+import datetime
+
 import yfinance as yf
 from langchain_core.tools import tool
+
+
+def _parse_pub_date(raw: str | None) -> str:
+    if not raw:
+        return "Unknown Date"
+    try:
+        # yfinance returns ISO 8601 like "2026-05-19T10:54:00Z"
+        return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except (TypeError, ValueError):
+        return str(raw)
 
 
 @tool
@@ -19,25 +33,15 @@ def get_financial_news(ticker: str) -> str:
             return f"No news found for ticker {ticker}."
 
         report = f"--- LATEST NEWS FOR {ticker} ---\n\n"
-        import datetime
 
-        for item in news_items[
-            :10
-        ]:  # Bumped to 10 articles for broader coverage
-            title = item.get("title", "No Title")
-            publisher = item.get("publisher", "Unknown Publisher")
-
-            # Include publish time so the model can judge recency
-            publish_time = item.get("providerPublishTime")
-            if publish_time:
-                date_str = datetime.datetime.fromtimestamp(publish_time).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-            else:
-                date_str = "Unknown Date"
-
-            # Include summary so the model has content to analyze, not just titles
-            summary = item.get("summary", "No summary available.")
+        for item in news_items[:10]:
+            # yfinance >= 0.2.x wraps each item as {"id": ..., "content": {...}}.
+            content = item.get("content") or item
+            title = content.get("title") or "No Title"
+            summary = content.get("summary") or content.get("description") or "No summary available."
+            provider = content.get("provider") or {}
+            publisher = provider.get("displayName") or "Unknown Publisher"
+            date_str = _parse_pub_date(content.get("pubDate") or content.get("displayTime"))
 
             report += f"Date: {date_str}\n"
             report += f"Title: {title}\n"
