@@ -5,6 +5,7 @@ import React, {
   useState,
   useEffect,
   useRef,
+  useCallback,
 } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { type Message } from "@langchain/langgraph-sdk";
@@ -43,6 +44,12 @@ type StreamContextType = BaseStreamContext & {
   isResuming: boolean;
   /** Live messages from the rejoined run; null when not resuming. */
   resumeMessages: Message[] | null;
+  /**
+   * Re-fire the resume effect to join a run on the current thread. Pass the
+   * run_id you just created to skip the list-pending lookup (whose status
+   * filter sometimes misses runs that have already transitioned to running).
+   */
+  triggerResume: (runId?: string) => void;
 };
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
@@ -104,8 +111,15 @@ const StreamSession = ({
 
   const [isResuming, setIsResuming] = useState(false);
   const [resumeValues, setResumeValues] = useState<StateType | null>(null);
-  const setThreadIdRef = useRef(setThreadId);
-  setThreadIdRef.current = setThreadId;
+  const [resumeNonce, setResumeNonce] = useState(0);
+  // When handleSubmit just created a run, it passes the run_id here so we
+  // don't have to wait for it to appear in /runs list (and risk missing it
+  // if it already transitioned past "pending").
+  const pendingRunIdRef = useRef<string | null>(null);
+  const triggerResume = useCallback((runId?: string) => {
+    if (runId) pendingRunIdRef.current = runId;
+    setResumeNonce((n) => n + 1);
+  }, []);
   const client = streamValue.client;
 
   useEffect(() => {
@@ -115,101 +129,182 @@ const StreamSession = ({
     const abort = new AbortController();
 
     const run = async () => {
-      // Look for an in-flight run on this thread. We retry briefly because a
-      // newly-created run can take a tick to show up in the list.
-      let pendingRunId: string | null = null;
-      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
-        try {
-          const runs = await client.runs.list(threadId, {
-            status: "pending",
-            limit: 1,
-          });
-          if (runs.length > 0) {
-            pendingRunId = runs[0].run_id;
-            break;
+      // Prefer the run_id that handleSubmit just handed us; fall back to
+      // listing in case we got here via cross-tab/resume-on-page-load.
+      let pendingRunId: string | null = pendingRunIdRef.current;
+      pendingRunIdRef.current = null;
+
+      if (!pendingRunId) {
+        for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+          try {
+            // No status filter — a run may already have moved past "pending"
+            // (e.g. to "running") by the time we look.
+            const runs = await client.runs.list(threadId, { limit: 5 });
+            const inFlight = runs.find((r) =>
+              ["pending", "running"].includes(r.status as string),
+            );
+            if (inFlight) {
+              pendingRunId = inFlight.run_id;
+              break;
+            }
+          } catch (err) {
+            console.error("Failed to list runs for resume", err);
+            return;
           }
-        } catch (err) {
-          console.error("Failed to list runs for resume", err);
-          return;
+          await sleep(300);
         }
-        await sleep(300);
       }
 
       if (cancelled || !pendingRunId) return;
 
       setIsResuming(true);
+      // Track the last SSE event id across reconnect attempts so we can
+      // resume from where the previous socket dropped. "-1" means "replay
+      // every buffered event from the start" (langgraph-api convention).
+      let lastEventId = "-1";
+      let runFinished = false;
+      let reconnectAttempt = 0;
+      const MAX_RECONNECTS = 30;
+
       try {
-        // We hit the SSE endpoint directly: the SDK's joinStream doesn't send
-        // `Last-Event-ID: -1`, which the backend requires to replay every
-        // buffered event from the start of a resumable run.
-        const url = new URL(
-          `/threads/${threadId}/runs/${pendingRunId}/stream`,
-          apiUrl,
-        );
-        url.searchParams.set("cancel_on_disconnect", "0");
-        url.searchParams.set("stream_mode", "values");
-        const res = await fetch(url.toString(), {
-          method: "GET",
-          signal: abort.signal,
-          headers: {
-            Accept: "text/event-stream",
-            "Last-Event-ID": "-1",
-            ...(apiKey ? { "X-Api-Key": apiKey } : {}),
-          },
-        });
-        if (!res.ok || !res.body) {
-          throw new Error(`joinStream failed: ${res.status} ${res.statusText}`);
-        }
+        // Outer reconnect loop. Some proxies (envoy, nginx) drop idle HTTP/2
+        // streams after ~15s; with stream_resumable=true the backend buffers
+        // events so we just reopen the SSE with Last-Event-ID and keep going.
+        while (!cancelled && !runFinished) {
+          // We hit the SSE endpoint directly: the SDK's joinStream doesn't
+          // send Last-Event-ID, which the backend requires to replay buffered
+          // events on resume.
+          const url = new URL(
+            `/threads/${threadId}/runs/${pendingRunId}/stream`,
+            apiUrl,
+          );
+          url.searchParams.set("cancel_on_disconnect", "0");
+          url.searchParams.set("stream_mode", "values");
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let currentEvent: { event?: string; data?: string } = {};
+          let socketClosedCleanly = false;
+          try {
+            const res = await fetch(url.toString(), {
+              method: "GET",
+              signal: abort.signal,
+              headers: {
+                Accept: "text/event-stream",
+                "Last-Event-ID": lastEventId,
+                ...(apiKey ? { "X-Api-Key": apiKey } : {}),
+              },
+            });
+            if (!res.ok || !res.body) {
+              throw new Error(
+                `joinStream failed: ${res.status} ${res.statusText}`,
+              );
+            }
 
-        const flush = () => {
-          if (currentEvent.event === "values" && currentEvent.data) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let currentEvent: { event?: string; data?: string; id?: string } = {};
+
+            const flush = () => {
+              if (currentEvent.id) lastEventId = currentEvent.id;
+              if (currentEvent.event === "values" && currentEvent.data) {
+                try {
+                  const parsed = JSON.parse(currentEvent.data) as StateType;
+                  setResumeValues(parsed);
+                } catch (e) {
+                  console.error("Failed to parse SSE values payload", e);
+                }
+              } else if (
+                currentEvent.event === "end" ||
+                currentEvent.event === "error"
+              ) {
+                runFinished = true;
+              }
+              currentEvent = {};
+            };
+
+            while (!cancelled) {
+              const { value, done } = await reader.read();
+              if (done) {
+                socketClosedCleanly = true;
+                break;
+              }
+              buffer += decoder.decode(value, { stream: true });
+              let newlineIdx: number;
+              while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+                const line = buffer.slice(0, newlineIdx).replace(/\r$/, "");
+                buffer = buffer.slice(newlineIdx + 1);
+                if (line === "") {
+                  flush();
+                } else if (line.startsWith("event:")) {
+                  currentEvent.event = line.slice(6).trim();
+                } else if (line.startsWith("data:")) {
+                  currentEvent.data =
+                    (currentEvent.data ?? "") + line.slice(5).trimStart();
+                } else if (line.startsWith("id:")) {
+                  currentEvent.id = line.slice(3).trim();
+                }
+                // Lines starting with `:` (comment) are ignored.
+              }
+            }
+          } catch (err) {
+            const name = (err as { name?: string })?.name;
+            if (name === "AbortError" || cancelled) {
+              break;
+            }
+            console.warn(
+              `SSE drop (attempt ${reconnectAttempt + 1}/${MAX_RECONNECTS}):`,
+              err,
+            );
+          }
+
+          if (cancelled || runFinished) break;
+
+          // Socket closed cleanly without "end" → check run status to decide
+          // whether to reconnect or stop.
+          if (socketClosedCleanly) {
             try {
-              const parsed = JSON.parse(currentEvent.data) as StateType;
-              setResumeValues(parsed);
-            } catch (e) {
-              console.error("Failed to parse SSE values payload", e);
+              const runs = await client.runs.list(threadId, { limit: 20 });
+              const me = runs.find((r) => r.run_id === pendingRunId);
+              if (
+                me &&
+                !["pending", "running"].includes(me.status as string)
+              ) {
+                runFinished = true;
+                break;
+              }
+            } catch {
+              // Fall through to reconnect.
             }
           }
-          currentEvent = {};
-        };
 
-        while (!cancelled) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let newlineIdx: number;
-          while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIdx).replace(/\r$/, "");
-            buffer = buffer.slice(newlineIdx + 1);
-            if (line === "") {
-              flush();
-            } else if (line.startsWith("event:")) {
-              currentEvent.event = line.slice(6).trim();
-            } else if (line.startsWith("data:")) {
-              currentEvent.data =
-                (currentEvent.data ?? "") + line.slice(5).trimStart();
-            }
-            // Lines starting with `id:` or `:` (comment) are ignored.
+          reconnectAttempt += 1;
+          if (reconnectAttempt > MAX_RECONNECTS) {
+            console.error(
+              "Giving up SSE resume after",
+              MAX_RECONNECTS,
+              "reconnects",
+            );
+            break;
           }
-        }
-      } catch (err) {
-        if ((err as { name?: string })?.name !== "AbortError") {
-          console.error("Resume stream error", err);
+          // Tiny backoff so we don't spin if the backend is unhealthy.
+          await sleep(Math.min(500 * reconnectAttempt, 3000));
         }
       } finally {
         if (!cancelled) {
+          // Keep the resumed messages visible until the user navigates away.
+          // useTypedStream only refetches on threadId change, so falling back
+          // to stream.messages here would briefly show stale state from before
+          // the run started. Pinning the final snapshot avoids that flicker.
+          try {
+            const finalState = await client.threads.getState(threadId);
+            const stateValues = finalState.values as StateType | null;
+            setResumeValues(
+              stateValues?.messages ? stateValues : null,
+            );
+          } catch (e) {
+            console.error("Failed to fetch final thread state", e);
+            setResumeValues(null);
+          }
           setIsResuming(false);
-          setResumeValues(null);
-          // Force the useStream hook to re-fetch history so the final
-          // checkpointed state replaces our in-flight resumeValues.
-          const current = threadId;
-          setThreadIdRef.current(null);
-          setTimeout(() => setThreadIdRef.current(current), 50);
         }
       }
     };
@@ -219,8 +314,13 @@ const StreamSession = ({
     return () => {
       cancelled = true;
       abort.abort();
+      // If the user navigates away mid-resume, the finally above is skipped
+      // (cancelled=true). Reset the local resume state here so a stale
+      // isResuming=true doesn't leak loading indicators into the next thread.
+      setIsResuming(false);
+      setResumeValues(null);
     };
-  }, [threadId, client, apiUrl, apiKey]);
+  }, [threadId, client, apiUrl, apiKey, resumeNonce]);
 
   useEffect(() => {
     checkGraphStatus(apiUrl, apiKey).then((ok) => {
@@ -244,6 +344,7 @@ const StreamSession = ({
     ...streamValue,
     isResuming,
     resumeMessages: resumeValues?.messages ?? null,
+    triggerResume,
   };
 
   return (

@@ -1,6 +1,8 @@
+import json
 import logging
 from typing import Any, Dict
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
 from src.agents.main_graph.state import MainState
@@ -16,39 +18,125 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 
+def _section(title: str, body: str) -> str:
+    body = (body or "").strip()
+    if not body:
+        return ""
+    return f"## {title}\n\n{body}\n"
+
+
+def _format_decision(decision: dict | str) -> str:
+    if not decision:
+        return "_Không có quyết định._"
+    if isinstance(decision, str):
+        return decision
+    action = decision.get("Final_Action", "—")
+    notes = decision.get("Review_Notes") or decision.get("reasoning") or ""
+    extras = {
+        k: v
+        for k, v in decision.items()
+        if k not in {"Final_Action", "Review_Notes", "reasoning"}
+    }
+    out = [f"**Quyết định:** `{action}`"]
+    if notes:
+        out.append(f"\n**Lý do:**\n\n{notes}")
+    if extras:
+        out.append("\n<details><summary>Chi tiết quyết định (JSON)</summary>\n\n```json\n"
+                   + json.dumps(extras, ensure_ascii=False, indent=2, default=str)
+                   + "\n```\n\n</details>")
+    return "\n".join(out)
+
+
+def _format_debate(debate: dict | None, title: str) -> str:
+    if not debate or not isinstance(debate, dict):
+        return ""
+    rounds = debate.get("history") or debate.get("rounds") or debate.get("transcript")
+    if not rounds:
+        # Fall back to dumping non-empty fields.
+        body = {k: v for k, v in debate.items() if v not in (None, "", 0, [])}
+        if not body:
+            return ""
+        return _section(
+            title,
+            "<details><summary>Chi tiết tranh luận</summary>\n\n```json\n"
+            + json.dumps(body, ensure_ascii=False, indent=2, default=str)
+            + "\n```\n\n</details>",
+        )
+    text = (
+        rounds
+        if isinstance(rounds, str)
+        else "\n\n".join(
+            f"- **{r.get('agent', '?')}**: {r.get('content', '')}"
+            for r in rounds
+            if isinstance(r, dict)
+        )
+    )
+    return _section(
+        title,
+        f"<details><summary>Xem toàn bộ tranh luận</summary>\n\n{text}\n\n</details>",
+    )
+
+
 def push_notification_node(state: MainState) -> Dict[str, Any]:
     print("\n" + "=" * 60)
     print("🚀 [NODE: Push Notification] Pushing final report to user...")
-    
-    # Lấy kết quả từ Research
-    decision = state.get("final_trade_decision", {})
-    action = decision.get("Final_Action", "NEUTRAL")
-    reasoning = decision.get("Review_Notes", "No reasoning provided.")
-    
-    # Lấy kết quả từ Execution
-    exec_action = state.get("action_taken", "NONE")
-    exec_msg = state.get("action_message", "No execution message.")
-    exec_amount = state.get("action_amount", 0.0)
-    
-    report = f"""
-==== 📊 BÁO CÁO GIAO DỊCH (TỔNG HỢP) ====
-[🧠 RESEARCH]
-- Quyết định: {action}
-- Lý do: {reasoning}
 
-[⚡ EXECUTION]
-- Hành động thực tế: {exec_action}
-- Số lượng: {exec_amount} USD
-- Trạng thái: {exec_msg}
-=======================================
-    """
-    print(report)
-    print("✅ Notification Sent Successfully (Simulated/Webhook ready).")
+    ticker = state.get("company_of_interest", "—")
+    trade_date = state.get("trade_date", "—")
+    current_price = state.get("current_price", 0.0)
+    entry_price = state.get("entry_price", 0.0)
+
+    decision = state.get("final_trade_decision", {}) or {}
+    action = decision.get("Final_Action", "NEUTRAL") if isinstance(decision, dict) else "NEUTRAL"
+    exec_action = state.get("action_taken", "NONE")
+    exec_msg = state.get("action_message", "")
+    exec_amount = state.get("action_amount", 0.0)
+
+    portfolio_value = state.get("portfolio_value", 0.0)
+    drawdown = state.get("drawdown_pct", 0.0)
+    usdt_balance = state.get("usdt_balance", 0.0)
+    xaut_balance = state.get("xaut_balance", 0.0)
+
+    trader_plan = state.get("trader_investment_plan") or {}
+    trader_plan_json = (
+        "```json\n" + json.dumps(trader_plan, ensure_ascii=False, indent=2, default=str) + "\n```"
+        if trader_plan
+        else ""
+    )
+
+    sections = [
+        f"# 📊 Báo cáo giao dịch — {ticker} ({trade_date})\n",
+        f"**Quyết định cuối cùng:** `{action}`  \n"
+        f"**Hành động thực tế:** `{exec_action}` ({exec_amount} USD)  \n"
+        f"**Trạng thái thực thi:** {exec_msg or '—'}  \n"
+        f"**Giá hiện tại / vào lệnh:** {current_price} / {entry_price}\n",
+        _section(
+            "💼 Trạng thái danh mục",
+            f"- Portfolio value: **{portfolio_value:.2f} USD**\n"
+            f"- Drawdown: {drawdown:.2f}%\n"
+            f"- USDT balance: {usdt_balance:.2f}\n"
+            f"- XAUT balance: {xaut_balance:.6f}",
+        ),
+        _section("📈 Market Analyst", state.get("market_report", "")),
+        _section("📰 News Analyst", state.get("news_report", "")),
+        _section("💬 Social / Sentiment Analyst", state.get("sentiment_report", "")),
+        _section("🏦 Fundamentals Analyst", state.get("fundamentals_report", "")),
+        _format_debate(state.get("investment_debate_state"), "🥊 Tranh luận đầu tư (Bull vs Bear)"),
+        _section("🧠 Investment Plan (Research Manager)", state.get("investment_plan", "")),
+        _section(
+            "📋 Trader Investment Plan",
+            trader_plan_json,
+        ),
+        _format_debate(state.get("risk_debate_state"), "⚖️ Tranh luận rủi ro"),
+        _section("✅ Quyết định cuối (Portfolio Manager)", _format_decision(decision)),
+    ]
+    report_md = "\n".join(s for s in sections if s)
+
+    print(report_md)
+    print("✅ Notification Sent Successfully.")
     print("=" * 60 + "\n")
-    
-    # Ở đây có thể tích hợp requests.post(WEBHOOK_URL) hoặc Telegram Bot
-    
-    return {}
+
+    return {"messages": [AIMessage(content=report_md)]}
 
 
 def build_main_graph():

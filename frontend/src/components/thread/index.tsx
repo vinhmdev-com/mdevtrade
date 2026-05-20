@@ -114,13 +114,38 @@ export function Thread() {
   const wasRunningRef = useRef(false);
   const [input, setInput] = useState("");
   const [firstTokenReceived, setFirstTokenReceived] = useState(false);
+  // Optimistic UI so the message renders before the resume SSE catches up.
+  const [optimisticHuman, setOptimisticHuman] = useState<Message | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
-  // While we are rejoining an in-flight server-side run, prefer the live
-  // values streamed from joinStream over the stale checkpoint history.
-  const messages = stream.resumeMessages ?? stream.messages;
-  const isLoading = stream.isLoading || stream.isResuming;
+  // Prefer live resume values over stale checkpoint history; fall back to []
+  // because useTypedStream returns undefined during init.
+  const baseMessages: Message[] =
+    stream.resumeMessages ?? stream.messages ?? [];
+  const messages =
+    optimisticHuman && !baseMessages.some((m) => m.id === optimisticHuman.id)
+      ? [...baseMessages, optimisticHuman]
+      : baseMessages;
+  const isLoading = stream.isLoading || stream.isResuming || isSubmitting;
+
+  // Drop the optimistic shim once the backend echoes it (single source of truth).
+  useEffect(() => {
+    if (
+      optimisticHuman &&
+      baseMessages.some((m) => m.id === optimisticHuman.id)
+    ) {
+      setOptimisticHuman(null);
+    }
+  }, [baseMessages, optimisticHuman]);
+
+  // Reset per-thread UI state; otherwise the previous thread's loading dots leak in.
+  useEffect(() => {
+    setFirstTokenReceived(false);
+    setOptimisticHuman(null);
+    setIsSubmitting(false);
+  }, [threadId]);
 
   const lastError = useRef<string | undefined>(undefined);
 
@@ -205,11 +230,46 @@ export function Thread() {
     };
   }, [threadId, apiUrl, assistantId, stream.isResuming]);
 
+  const createThreadOnBackend = async (): Promise<string> => {
+    if (!apiUrl) throw new Error("Thiếu API URL.");
+    const apiKey = getApiKey();
+    const authHeaders: Record<string, string> = apiKey ? { "X-Api-Key": apiKey } : {};
+    const res = await fetch(`${apiUrl}/threads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || res.statusText);
+    }
+    const data = await res.json();
+    return data.thread_id as string;
+  };
+
+  const createNewSession = async () => {
+    try {
+      const id = await createThreadOnBackend();
+      setThreadId(id);
+      toast.success("✨ Đã tạo phiên mới.");
+    } catch (err: any) {
+      toast.error("Không tạo được phiên mới: " + (err?.message ?? "unknown"));
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
-    setFirstTokenReceived(false);
+    if (!input.trim()) return;
+    if (!apiUrl || !assistantId) return;
 
+    // Backend queues concurrent runs silently (no 409). Guard at the client so
+    // users don't quietly stack multiple analyses on the same thread.
+    if (isLoading) {
+      toast.warning("⏳ Tác vụ trước chưa xong. Vui lòng đợi hoặc bấm 'New thread' để mở phiên mới.");
+      return;
+    }
+
+    setFirstTokenReceived(false);
     const userInput = input;
     setInput("");
 
@@ -219,35 +279,25 @@ export function Thread() {
       content: userInput,
     };
 
+    // Render immediately so the screen doesn't look frozen during the SSE round-trip.
+    setOptimisticHuman(newHumanMessage);
+    setIsSubmitting(true);
+
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
-
-    if (!apiUrl || !assistantId) return;
-
-    // The SDK's runs.create doesn't expose stream_resumable, but the backend
-    // does — and without it the joinStream endpoint won't replay events when
-    // the user reopens the UI mid-run. So we hit the HTTP endpoint directly.
     const apiKey = getApiKey();
     const authHeaders: Record<string, string> = apiKey ? { "X-Api-Key": apiKey } : {};
+
     try {
-      // First message in a new conversation: no threadId yet. Create one before
-      // kicking off the run, since /threads/{id}/runs requires an existing thread.
+      // Auto-create thread on first message so the user doesn't have to hit "New thread".
       let activeThreadId = threadId;
       if (!activeThreadId) {
-        const createRes = await fetch(`${apiUrl}/threads`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders },
-          body: JSON.stringify({}),
-        });
-        if (!createRes.ok) {
-          const text = await createRes.text();
-          throw Object.assign(new Error(text || createRes.statusText), {
-            status: createRes.status,
-          });
-        }
-        const data = await createRes.json();
-        activeThreadId = data.thread_id;
+        activeThreadId = await createThreadOnBackend();
+        setThreadId(activeThreadId);
       }
 
+      // The SDK's runs.create doesn't expose stream_resumable, but the backend
+      // does — without it joinStream won't replay buffered events when the
+      // user reopens the UI mid-run. So we hit the HTTP endpoint directly.
       const res = await fetch(`${apiUrl}/threads/${activeThreadId}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders },
@@ -260,22 +310,19 @@ export function Thread() {
       });
       if (!res.ok) {
         const text = await res.text();
-        throw Object.assign(new Error(text || res.statusText), {
-          status: res.status,
-        });
+        throw new Error(text || res.statusText);
       }
+      const runData = await res.json();
       toast.info("🚀 Đã gửi lệnh. Hệ thống đang tiến hành phân tích ngầm...");
-
-      // Force refresh to show the human message in UI; this also re-fires the
-      // resume effect in StreamProvider, which will pick up the new run.
-      setThreadId(null);
-      setTimeout(() => setThreadId(activeThreadId), 50);
+      // Pass run_id directly so the resume effect doesn't have to race with
+      // the runs-list endpoint to find this run.
+      stream.triggerResume(runData.run_id);
     } catch (err: any) {
-      if (err?.status === 409 || (err.message && err.message.includes("409"))) {
-        toast.warning("⏳ Hệ thống đang bận xử lý tác vụ trước đó. Vui lòng chờ hoàn tất!");
-      } else {
-        toast.error("Lỗi: " + err.message);
-      }
+      setOptimisticHuman(null);
+      toast.error("Lỗi: " + (err?.message ?? "unknown"));
+    } finally {
+      // Small delay so isResuming takes over before isSubmitting clears (no flicker).
+      setTimeout(() => setIsSubmitting(false), 500);
     }
   };
 
@@ -357,7 +404,16 @@ export function Thread() {
                 </Button>
               )}
             </div>
-            <div className="absolute top-2 right-4 flex items-center">
+            <div className="absolute top-2 right-4 flex items-center gap-3">
+              <TooltipIconButton
+                size="lg"
+                className="p-4"
+                tooltip="Bắt đầu phiên mới"
+                variant="ghost"
+                onClick={createNewSession}
+              >
+                <SquarePen className="size-5" />
+              </TooltipIconButton>
               <OpenGitHubRepo />
             </div>
           </div>
@@ -408,7 +464,7 @@ export function Thread() {
                 className="p-4"
                 tooltip="New thread"
                 variant="ghost"
-                onClick={() => setThreadId(null)}
+                onClick={createNewSession}
               >
                 <SquarePen className="size-5" />
               </TooltipIconButton>
