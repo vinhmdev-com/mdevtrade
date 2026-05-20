@@ -231,7 +231,7 @@ export function Thread() {
   }, [threadId, apiUrl, assistantId, stream.isResuming]);
 
   const createThreadOnBackend = async (): Promise<string> => {
-    if (!apiUrl) throw new Error("Thiếu API URL.");
+    if (!apiUrl) throw new Error("Missing API URL.");
     const apiKey = getApiKey();
     const authHeaders: Record<string, string> = apiKey ? { "X-Api-Key": apiKey } : {};
     const res = await fetch(`${apiUrl}/threads`, {
@@ -251,9 +251,9 @@ export function Thread() {
     try {
       const id = await createThreadOnBackend();
       setThreadId(id);
-      toast.success("✨ Đã tạo phiên mới.");
+      toast.success("✨ New session created.");
     } catch (err: any) {
-      toast.error("Không tạo được phiên mới: " + (err?.message ?? "unknown"));
+      toast.error("Failed to create session: " + (err?.message ?? "unknown"));
     }
   };
 
@@ -265,7 +265,7 @@ export function Thread() {
     // Backend queues concurrent runs silently (no 409). Guard at the client so
     // users don't quietly stack multiple analyses on the same thread.
     if (isLoading) {
-      toast.warning("⏳ Tác vụ trước chưa xong. Vui lòng đợi hoặc bấm 'New thread' để mở phiên mới.");
+      toast.warning("⏳ Previous task still running. Please wait or click 'New thread' to start a new session.");
       return;
     }
 
@@ -408,7 +408,7 @@ export function Thread() {
               <TooltipIconButton
                 size="lg"
                 className="p-4"
-                tooltip="Bắt đầu phiên mới"
+                tooltip="Start new session"
                 variant="ghost"
                 onClick={createNewSession}
               >

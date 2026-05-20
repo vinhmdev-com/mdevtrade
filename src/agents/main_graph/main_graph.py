@@ -27,7 +27,7 @@ def _section(title: str, body: str) -> str:
 
 def _format_decision(decision: dict | str) -> str:
     if not decision:
-        return "_Không có quyết định._"
+        return "_No decision._"
     if isinstance(decision, str):
         return decision
     action = decision.get("Final_Action", "—")
@@ -37,11 +37,11 @@ def _format_decision(decision: dict | str) -> str:
         for k, v in decision.items()
         if k not in {"Final_Action", "Review_Notes", "reasoning"}
     }
-    out = [f"**Quyết định:** `{action}`"]
+    out = [f"**Decision:** `{action}`"]
     if notes:
-        out.append(f"\n**Lý do:**\n\n{notes}")
+        out.append(f"\n**Reasoning:**\n\n{notes}")
     if extras:
-        out.append("\n<details><summary>Chi tiết quyết định (JSON)</summary>\n\n```json\n"
+        out.append("\n<details><summary>Decision details (JSON)</summary>\n\n```json\n"
                    + json.dumps(extras, ensure_ascii=False, indent=2, default=str)
                    + "\n```\n\n</details>")
     return "\n".join(out)
@@ -58,7 +58,7 @@ def _format_debate(debate: dict | None, title: str) -> str:
             return ""
         return _section(
             title,
-            "<details><summary>Chi tiết tranh luận</summary>\n\n```json\n"
+            "<details><summary>Debate details</summary>\n\n```json\n"
             + json.dumps(body, ensure_ascii=False, indent=2, default=str)
             + "\n```\n\n</details>",
         )
@@ -73,7 +73,7 @@ def _format_debate(debate: dict | None, title: str) -> str:
     )
     return _section(
         title,
-        f"<details><summary>Xem toàn bộ tranh luận</summary>\n\n{text}\n\n</details>",
+        f"<details><summary>View full debate</summary>\n\n{text}\n\n</details>",
     )
 
 
@@ -105,13 +105,13 @@ def push_notification_node(state: MainState) -> Dict[str, Any]:
     )
 
     sections = [
-        f"# 📊 Báo cáo giao dịch — {ticker} ({trade_date})\n",
-        f"**Quyết định cuối cùng:** `{action}`  \n"
-        f"**Hành động thực tế:** `{exec_action}` ({exec_amount} USD)  \n"
-        f"**Trạng thái thực thi:** {exec_msg or '—'}  \n"
-        f"**Giá hiện tại / vào lệnh:** {current_price} / {entry_price}\n",
+        f"# 📊 Trading report — {ticker} ({trade_date})\n",
+        f"**Final decision:** `{action}`  \n"
+        f"**Action taken:** `{exec_action}` ({exec_amount} USD)  \n"
+        f"**Execution status:** {exec_msg or '—'}  \n"
+        f"**Current / entry price:** {current_price} / {entry_price}\n",
         _section(
-            "💼 Trạng thái danh mục",
+            "💼 Portfolio status",
             f"- Portfolio value: **{portfolio_value:.2f} USD**\n"
             f"- Drawdown: {drawdown:.2f}%\n"
             f"- USDT balance: {usdt_balance:.2f}\n"
@@ -121,14 +121,14 @@ def push_notification_node(state: MainState) -> Dict[str, Any]:
         _section("📰 News Analyst", state.get("news_report", "")),
         _section("💬 Social / Sentiment Analyst", state.get("sentiment_report", "")),
         _section("🏦 Fundamentals Analyst", state.get("fundamentals_report", "")),
-        _format_debate(state.get("investment_debate_state"), "🥊 Tranh luận đầu tư (Bull vs Bear)"),
+        _format_debate(state.get("investment_debate_state"), "🥊 Investment debate (Bull vs Bear)"),
         _section("🧠 Investment Plan (Research Manager)", state.get("investment_plan", "")),
         _section(
             "📋 Trader Investment Plan",
             trader_plan_json,
         ),
-        _format_debate(state.get("risk_debate_state"), "⚖️ Tranh luận rủi ro"),
-        _section("✅ Quyết định cuối (Portfolio Manager)", _format_decision(decision)),
+        _format_debate(state.get("risk_debate_state"), "⚖️ Risk debate"),
+        _section("✅ Final decision (Portfolio Manager)", _format_decision(decision)),
     ]
     report_md = "\n".join(s for s in sections if s)
 
