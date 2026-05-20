@@ -10,7 +10,7 @@ from src.agents.trading_research.states.trading_analysis_state import (
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Thêm console handler để in log ra màn hình rõ ràng
+# Attach a console handler so logs print clearly to stdout
 if not logger.handlers:
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
@@ -85,7 +85,7 @@ def save_to_database(state: TradingAnalysisState) -> Dict[str, Any]:
             reasoning=reasoning,
             full_json=json.dumps(
                 state, default=str
-            ),  # dùng default=str để xử lý datetime nếu có
+            ),  # default=str so datetime values serialize
         )
         print(f"✅ Successfully saved Signal to Database! (Signal ID: {signal_id})")
     except Exception as e:

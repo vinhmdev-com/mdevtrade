@@ -215,7 +215,7 @@ export function Thread() {
           }
         } else if (wasRunningRef.current && isMounted) {
           wasRunningRef.current = false;
-          toast.success("✅ Tác vụ phân tích đã hoàn tất!");
+          toast.success("✅ Analysis task completed!");
         }
       } catch (e) {
         console.error("Polling error", e);
@@ -313,13 +313,13 @@ export function Thread() {
         throw new Error(text || res.statusText);
       }
       const runData = await res.json();
-      toast.info("🚀 Đã gửi lệnh. Hệ thống đang tiến hành phân tích ngầm...");
+      toast.info("🚀 Request sent. The system is analyzing in the background...");
       // Pass run_id directly so the resume effect doesn't have to race with
       // the runs-list endpoint to find this run.
       stream.triggerResume(runData.run_id);
     } catch (err: any) {
       setOptimisticHuman(null);
-      toast.error("Lỗi: " + (err?.message ?? "unknown"));
+      toast.error("Error: " + (err?.message ?? "unknown"));
     } finally {
       // Small delay so isResuming takes over before isSubmitting clears (no flicker).
       setTimeout(() => setIsSubmitting(false), 500);

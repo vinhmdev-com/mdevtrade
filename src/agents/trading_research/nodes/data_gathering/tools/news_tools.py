@@ -23,11 +23,11 @@ def get_financial_news(ticker: str) -> str:
 
         for item in news_items[
             :10
-        ]:  # Tăng lên 10 tin để lấy được bức tranh toàn cảnh hơn
+        ]:  # Bumped to 10 articles for broader coverage
             title = item.get("title", "No Title")
             publisher = item.get("publisher", "Unknown Publisher")
 
-            # Lấy thời gian đăng bài để AI biết tin này là cũ hay mới
+            # Include publish time so the model can judge recency
             publish_time = item.get("providerPublishTime")
             if publish_time:
                 date_str = datetime.datetime.fromtimestamp(publish_time).strftime(
@@ -36,7 +36,7 @@ def get_financial_news(ticker: str) -> str:
             else:
                 date_str = "Unknown Date"
 
-            # Lấy summary để AI có nội dung phân tích thay vì chỉ đọc mỗi cái Title
+            # Include summary so the model has content to analyze, not just titles
             summary = item.get("summary", "No summary available.")
 
             report += f"Date: {date_str}\n"

@@ -141,8 +141,8 @@ def push_notification_node(state: MainState) -> Dict[str, Any]:
 
 def build_main_graph():
     builder = StateGraph(MainState)
-    
-    # Thêm 2 Subgraphs như là 2 Nodes
+
+    # Add the 2 subgraphs as nodes
     builder.add_node("Research_Subgraph", research_graph)
     builder.add_node("Execution_Subgraph", execution_graph)
     builder.add_node("Push_Notification", push_notification_node)

@@ -20,11 +20,11 @@ class Settings(BaseSettings):
     # DB Settings
     trading_memory_db_path: Optional[str] = None
 
-    # Tự động đọc từ file .env
+    # Auto-load values from the .env file
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore",  # Bỏ qua các biến env không khai báo ở đây (như LANGSMITH_*)
+        extra="ignore",  # Ignore env vars not declared here (e.g. LANGSMITH_*)
     )
 
 
